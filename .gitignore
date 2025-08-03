@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+uploads/
+*.db
+.env
+/.venv/
+ollama/
+*.ollama
+*.bin
+*.log
+models/
