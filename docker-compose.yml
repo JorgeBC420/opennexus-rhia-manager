@@ -1,0 +1,32 @@
+version: '3.8'
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: opennexus_rh_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: admin
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    command: ["ollama", "serve"]
+  app:
+    build: .
+    depends_on:
+      - db
+      - ollama
+    environment:
+      DATABASE_URI: postgresql://postgres:admin@db:5432/opennexus_rh_db
+      OLLAMA_API_URL: http://ollama:11434/api/generate
+      OLLAMA_MODEL: llama3
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+volumes:
+  pgdata:

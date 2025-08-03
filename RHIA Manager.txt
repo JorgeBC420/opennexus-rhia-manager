@@ -1,0 +1,611 @@
+# OpenNexus RHIA Manager - Aplicación de RRHH con IA
+# Versión 1.1.0 - MVP+ (Módulos de Planilla y Horarios)
+#
+# Descripción:
+# Aplicación de escritorio completa para la gestión de Recursos Humanos. Integra gestión
+# de empleados, reclutamiento con IA (Ollama), control de horarios y cálculo de planillas.
+#
+# Stack Tecnológico:
+# - Lenguaje: Python 3.10+
+# - Interfaz Gráfica: PyQt6
+# - Base de Datos: PostgreSQL
+# - ORM: SQLAlchemy
+# - Análisis de IA: Ollama (corriendo localmente)
+# - Manejo de Documentos: PyPDF2, python-docx, beautifulsoup4
+# - Exportación: pandas, openpyxl, FPDF
+#
+# Para ejecutar:
+# 1. Asegúrate de tener PostgreSQL y Ollama instalados y corriendo.
+#    - En Ollama, ejecuta: `ollama pull llama3`
+# 2. Crea una base de datos en PostgreSQL (ej. 'opennexus_rh_db').
+# 3. Instala las dependencias: pip install PyQt6 sqlalchemy psycopg2-binary pandas openpyxl fpdf2 requests PyPDF2 python-docx beautifulsoup4
+# 4. Actualiza la variable DATABASE_URI con tus credenciales.
+# 5. Ejecuta el script.
+
+import sys
+import os
+import json
+import requests
+from io import BytesIO
+from datetime import datetime, timedelta
+
+# --- Dependencias de Terceros ---
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QTableView, QHeaderView,
+    QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, QLabel,
+    QFormLayout, QDialog, QMessageBox, QTabWidget, QTextEdit,
+    QComboBox, QFileDialog, QProgressDialog, QInputDialog, QDateEdit
+)
+from PyQt6.QtCore import Qt, QAbstractTableModel, QThread, pyqtSignal, QDate
+
+from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, DateTime, Boolean, Text
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+
+import pandas as pd
+from fpdf import FPDF
+import PyPDF2
+import docx
+from bs4 import BeautifulSoup
+
+# --- Configuración de la Aplicación ---
+
+DATABASE_URI = "postgresql://postgres:admin@localhost:5432/opennexus_rh_db"
+OLLAMA_API_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "llama3"
+
+# --- Modelos de Base de Datos (SQLAlchemy) ---
+
+Base = declarative_base()
+
+class Empleado(Base):
+    __tablename__ = 'empleados'
+    id = Column(Integer, primary_key=True)
+    nombre = Column(String(100), nullable=False)
+    badge = Column(String(20))
+    cedula = Column(String(20), nullable=False, unique=True)
+    iban = Column(String(34), nullable=False)
+    fecha_ingreso = Column(DateTime, default=datetime.utcnow)
+    salario_base = Column(Float, default=0.0)
+    departamento = Column(String(50))
+    activo = Column(Boolean, default=True)
+    asistencias = relationship("Asistencia", back_populates="empleado")
+    planillas = relationship("Planilla", back_populates="empleado")
+
+class Asistencia(Base):
+    __tablename__ = 'asistencias'
+    id = Column(Integer, primary_key=True)
+    empleado_id = Column(Integer, ForeignKey('empleados.id'))
+    fecha_hora_entrada = Column(DateTime, default=datetime.utcnow)
+    fecha_hora_salida = Column(DateTime)
+    empleado = relationship("Empleado", back_populates="asistencias")
+
+class Planilla(Base):
+    __tablename__ = 'planillas'
+    id = Column(Integer, primary_key=True)
+    empleado_id = Column(Integer, ForeignKey('empleados.id'))
+    periodo_inicio = Column(DateTime)
+    periodo_fin = Column(DateTime)
+    salario_bruto = Column(Float)
+    deducciones = Column(Float)
+    salario_neto = Column(Float)
+    fecha_calculo = Column(DateTime, default=datetime.utcnow)
+    empleado = relationship("Empleado", back_populates="planillas")
+
+class Puesto(Base):
+    __tablename__ = 'puestos'
+    id = Column(Integer, primary_key=True)
+    titulo = Column(String(100), nullable=False)
+    descripcion = Column(Text)
+    requerimientos = Column(Text)
+    activo = Column(Boolean, default=True)
+
+class Candidato(Base):
+    __tablename__ = 'candidatos'
+    id = Column(Integer, primary_key=True)
+    nombre = Column(String(100), nullable=False)
+    puesto_id = Column(Integer, ForeignKey('puestos.id'))
+    cv_texto = Column(Text)
+    fecha_postulacion = Column(DateTime, default=datetime.utcnow)
+    puntuacion_general = Column(Integer)
+    resumen_alineacion = Column(Text)
+    habilidades_encontradas = Column(Text)
+    experiencia_relevante_anos = Column(Integer)
+    nivel_ingles_estimado = Column(String(10))
+    puntos_fuertes = Column(Text)
+    posibles_debilidades = Column(Text)
+    puesto = relationship('Puesto')
+
+try:
+    engine = create_engine(DATABASE_URI)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+except Exception as e:
+    print(f"Error conectando a la base de datos: {e}")
+    sys.exit(1)
+
+# --- Lógica de Negocio y Utilidades (sin cambios, omitido por brevedad) ---
+def extract_text_from_file(file_path, file_bytes):
+    ext = os.path.splitext(file_path)[1].lower()
+    text = ""
+    try:
+        if ext == '.pdf':
+            reader = PyPDF2.PdfReader(BytesIO(file_bytes))
+            for page in reader.pages:
+                text += page.extract_text() or ""
+        elif ext == '.docx':
+            doc = docx.Document(BytesIO(file_bytes))
+            text = "\n".join([para.text for para in doc.paragraphs])
+        elif ext in ['.html', '.htm']:
+            soup = BeautifulSoup(file_bytes, 'html.parser')
+            text = soup.get_text(separator='\n', strip=True)
+        elif ext == '.txt':
+            text = file_bytes.decode('utf-8', errors='ignore')
+    except Exception as e:
+        print(f"Error extrayendo texto del archivo {file_path}: {e}")
+    return text
+
+def analyze_cv_with_ollama(job_requirements, cv_text):
+    prompt = f"""
+    Actúa como un reclutador técnico senior altamente experimentado para una startup de tecnología en Costa Rica. Tu tarea es analizar el siguiente currículum y evaluarlo objetivamente contra los requerimientos del puesto.
+
+    **Puesto:**
+    {job_requirements['titulo']}
+
+    **Requerimientos Clave:**
+    {job_requirements['requerimientos']}
+
+    **Texto del Currículum:**
+    ---
+    {cv_text[:8000]}
+    ---
+
+    **Tu Tarea:**
+    Analiza el CV y proporciona tu evaluación EXCLUSIVAMENTE en formato JSON. No añadas ningún texto antes o después del JSON. La estructura debe ser la siguiente:
+
+    {{
+      "puntuacion_general": <un número entero de 1 a 100>,
+      "resumen_alineacion": "<Un resumen conciso de 2-3 frases explicando por qué el candidato es o no es un buen fit>",
+      "habilidades_encontradas": ["<lista de habilidades clave que coinciden>"],
+      "experiencia_relevante_anos": <un número estimado de años de experiencia relevante>,
+      "nivel_ingles_estimado": "<A1, A2, B1, B2, C1, C2, o N/A>",
+      "puntos_fuertes": "<Describe en una frase los puntos más fuertes del candidato para este puesto>",
+      "posibles_debilidades": "<Describe en una frase las posibles áreas donde el candidato no cumple>"
+    }}
+    """
+    data = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "format": "json",
+        "stream": False
+    }
+    try:
+        response = requests.post(OLLAMA_API_URL, json=data, timeout=120)
+        response.raise_for_status()
+        response_json = response.json()
+        generated_text = response_json.get('response', '')
+        return json.loads(generated_text)
+    except requests.exceptions.RequestException as e:
+        print(f"Error en la solicitud a Ollama: {e}")
+    except json.JSONDecodeError as e:
+        print(f"Error decodificando JSON de Ollama: {e}")
+    return None
+
+# --- Hilo para Tareas Asíncronas ---
+class AnalysisThread(QThread):
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, job_requirements, cv_text):
+        super().__init__()
+        self.job_requirements = job_requirements
+        self.cv_text = cv_text
+
+    def run(self):
+        try:
+            analysis = analyze_cv_with_ollama(self.job_requirements, self.cv_text)
+            if analysis:
+                self.finished.emit(analysis)
+            else:
+                self.error.emit("El análisis de IA no devolvió resultados.")
+        except Exception as e:
+            self.error.emit(f"Error en el hilo de análisis: {e}")
+
+# --- Modelos de Tabla para PyQt6 ---
+class GenericTableModel(QAbstractTableModel):
+    def __init__(self, data=None, headers=None):
+        super().__init__()
+        self._data = data or []
+        self.headers = headers or []
+
+    def rowCount(self, parent=None):
+        return len(self._data)
+
+    def columnCount(self, parent=None):
+        return len(self.headers)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole:
+            return self._data[index.row()][index.column()]
+        return None
+
+    def headerData(self, section, orientation, role):
+        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
+            return self.headers[section]
+        return None
+
+# --- Interfaz Gráfica (PyQt6) ---
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("OpenNexus RHIA Manager - Plataforma de RRHH")
+        self.setGeometry(100, 100, 1200, 700)
+
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+
+        self.create_empleados_tab()
+        self.create_horarios_tab()
+        self.create_planillas_tab()
+        self.create_reclutamiento_tab()
+
+    def create_empleados_tab(self):
+        # (Sin cambios, omitido por brevedad)
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        form_layout = QFormLayout()
+        self.emp_nombre = QLineEdit()
+        self.emp_badge = QLineEdit()
+        self.emp_cedula = QLineEdit()
+        self.emp_iban = QLineEdit()
+        self.emp_salario = QLineEdit() # Campo nuevo para salario
+        form_layout.addRow("Nombre Completo:", self.emp_nombre)
+        form_layout.addRow("N° de Badge:", self.emp_badge)
+        form_layout.addRow("Cédula:", self.emp_cedula)
+        form_layout.addRow("Cuenta IBAN:", self.emp_iban)
+        form_layout.addRow("Salario Base Mensual:", self.emp_salario)
+        layout.addLayout(form_layout)
+        btn_layout = QHBoxLayout()
+        btn_add = QPushButton("Agregar Empleado")
+        btn_add.clicked.connect(self.add_empleado)
+        btn_layout.addWidget(btn_add)
+        layout.addLayout(btn_layout)
+        self.empleados_table = QTableView()
+        self.empleados_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.empleados_table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        layout.addWidget(self.empleados_table)
+        self.tabs.addTab(tab, "Gestión de Empleados")
+        self.load_empleados_data()
+
+    def create_horarios_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        top_layout = QHBoxLayout()
+        top_layout.addWidget(QLabel("Empleado:"))
+        self.horarios_empleado_combo = QComboBox()
+        top_layout.addWidget(self.horarios_empleado_combo)
+        
+        btn_marcar_entrada = QPushButton("Marcar Entrada")
+        btn_marcar_entrada.clicked.connect(self.marcar_entrada)
+        top_layout.addWidget(btn_marcar_entrada)
+        
+        btn_marcar_salida = QPushButton("Marcar Salida")
+        btn_marcar_salida.clicked.connect(self.marcar_salida)
+        top_layout.addWidget(btn_marcar_salida)
+        
+        layout.addLayout(top_layout)
+        
+        self.asistencia_table = QTableView()
+        layout.addWidget(self.asistencia_table)
+
+        self.tabs.addTab(tab, "Control de Horarios")
+        self.load_empleados_para_combos()
+
+    def create_planillas_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        top_layout = QHBoxLayout()
+        top_layout.addWidget(QLabel("Periodo (Mes/Año):"))
+        self.planilla_date_edit = QDateEdit(QDate.currentDate())
+        self.planilla_date_edit.setDisplayFormat("MM/yyyy")
+        top_layout.addWidget(self.planilla_date_edit)
+
+        btn_calcular = QPushButton("Calcular Planilla del Periodo")
+        btn_calcular.clicked.connect(self.calcular_planilla)
+        top_layout.addWidget(btn_calcular)
+        
+        btn_exportar = QPushButton("Exportar a Excel")
+        btn_exportar.clicked.connect(self.exportar_planilla)
+        top_layout.addWidget(btn_exportar)
+
+        layout.addLayout(top_layout)
+        
+        self.planilla_table = QTableView()
+        layout.addWidget(self.planilla_table)
+        
+        self.tabs.addTab(tab, "Gestión de Planilla")
+
+    def create_reclutamiento_tab(self):
+        # (Sin cambios, omitido por brevedad)
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        top_layout = QHBoxLayout()
+        top_layout.addWidget(QLabel("Puesto:"))
+        self.puestos_combo = QComboBox()
+        self.puestos_combo.currentIndexChanged.connect(self.load_candidatos_data)
+        top_layout.addWidget(self.puestos_combo)
+        btn_new_puesto = QPushButton("Crear Puesto")
+        btn_new_puesto.clicked.connect(self.create_puesto)
+        top_layout.addWidget(btn_new_puesto)
+        btn_upload_cv = QPushButton("Subir CV para Puesto")
+        btn_upload_cv.clicked.connect(self.upload_cv)
+        top_layout.addWidget(btn_upload_cv)
+        layout.addLayout(top_layout)
+        self.candidatos_table = QTableView()
+        self.candidatos_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.candidatos_table)
+        self.tabs.addTab(tab, "Reclutamiento Inteligente")
+        self.load_puestos_data()
+
+    # --- Métodos para Pestaña de Empleados ---
+    def load_empleados_data(self):
+        with Session() as session:
+            empleados = session.query(Empleado).order_by(Empleado.nombre).all()
+            data = [[e.id, e.nombre, e.badge, e.cedula, e.iban, f"₡{e.salario_base:,.2f}"] for e in empleados]
+            headers = ["ID", "Nombre", "Badge", "Cédula", "IBAN", "Salario Base"]
+            model = GenericTableModel(data, headers)
+            self.empleados_table.setModel(model)
+        self.load_empleados_para_combos()
+
+    def add_empleado(self):
+        nombre = self.emp_nombre.text().strip()
+        cedula = self.emp_cedula.text().strip()
+        iban = self.emp_iban.text().strip()
+        salario_str = self.emp_salario.text().strip()
+
+        if not all([nombre, cedula, iban, salario_str]):
+            QMessageBox.warning(self, "Datos incompletos", "Todos los campos son requeridos.")
+            return
+        
+        try:
+            salario_base = float(salario_str)
+        except ValueError:
+            QMessageBox.warning(self, "Dato Inválido", "El salario base debe ser un número.")
+            return
+
+        with Session() as session:
+            session.add(Empleado(nombre=nombre, cedula=cedula, iban=iban, badge=self.emp_badge.text().strip(), salario_base=salario_base))
+            session.commit()
+        
+        self.load_empleados_data()
+        for widget in [self.emp_nombre, self.emp_badge, self.emp_cedula, self.emp_iban, self.emp_salario]:
+            widget.clear()
+
+    def load_empleados_para_combos(self):
+        self.horarios_empleado_combo.clear()
+        with Session() as session:
+            empleados = session.query(Empleado).filter(Empleado.activo == True).order_by(Empleado.nombre).all()
+            for e in empleados:
+                self.horarios_empleado_combo.addItem(e.nombre, e.id)
+
+    # --- Métodos para Pestaña de Horarios ---
+    def marcar_entrada(self):
+        empleado_id = self.horarios_empleado_combo.currentData()
+        if not empleado_id: return
+
+        with Session() as session:
+            # Opcional: Verificar si ya hay una entrada abierta
+            entrada_abierta = session.query(Asistencia).filter(Asistencia.empleado_id == empleado_id, Asistencia.fecha_hora_salida == None).first()
+            if entrada_abierta:
+                QMessageBox.warning(self, "Marca Duplicada", "Este empleado ya tiene una marca de entrada sin registrar salida.")
+                return
+            
+            nueva_asistencia = Asistencia(empleado_id=empleado_id)
+            session.add(nueva_asistencia)
+            session.commit()
+            QMessageBox.information(self, "Éxito", "Marca de entrada registrada.")
+        self.load_asistencia_data()
+
+    def marcar_salida(self):
+        empleado_id = self.horarios_empleado_combo.currentData()
+        if not empleado_id: return
+
+        with Session() as session:
+            ultima_entrada = session.query(Asistencia).filter(Asistencia.empleado_id == empleado_id, Asistencia.fecha_hora_salida == None).order_by(Asistencia.fecha_hora_entrada.desc()).first()
+            if not ultima_entrada:
+                QMessageBox.warning(self, "Error", "No se encontró una marca de entrada abierta para este empleado.")
+                return
+            
+            ultima_entrada.fecha_hora_salida = datetime.utcnow()
+            session.commit()
+            QMessageBox.information(self, "Éxito", "Marca de salida registrada.")
+        self.load_asistencia_data()
+
+    def load_asistencia_data(self):
+        empleado_id = self.horarios_empleado_combo.currentData()
+        if not empleado_id: return
+        
+        with Session() as session:
+            asistencias = session.query(Asistencia).filter(Asistencia.empleado_id == empleado_id).order_by(Asistencia.fecha_hora_entrada.desc()).limit(100).all()
+            data = []
+            for a in asistencias:
+                entrada = a.fecha_hora_entrada.strftime('%Y-%m-%d %H:%M:%S')
+                salida = a.fecha_hora_salida.strftime('%Y-%m-%d %H:%M:%S') if a.fecha_hora_salida else "PENDIENTE"
+                horas = "N/A"
+                if a.fecha_hora_salida:
+                    horas = str(round((a.fecha_hora_salida - a.fecha_hora_entrada).total_seconds() / 3600, 2))
+                data.append([entrada, salida, horas])
+            
+            headers = ["Entrada", "Salida", "Horas Trabajadas"]
+            model = GenericTableModel(data, headers)
+            self.asistencia_table.setModel(model)
+
+    # --- Métodos para Pestaña de Planillas ---
+    def calcular_planilla(self):
+        periodo = self.planilla_date_edit.date().toPyDate()
+        inicio_periodo = datetime(periodo.year, periodo.month, 1)
+        fin_periodo = (inicio_periodo + timedelta(days=31)).replace(day=1) - timedelta(days=1)
+
+        with Session() as session:
+            empleados = session.query(Empleado).filter(Empleado.activo == True).all()
+            for emp in empleados:
+                asistencias = session.query(Asistencia).filter(
+                    Asistencia.empleado_id == emp.id,
+                    Asistencia.fecha_hora_entrada >= inicio_periodo,
+                    Asistencia.fecha_hora_salida <= fin_periodo,
+                    Asistencia.fecha_hora_salida != None
+                ).all()
+
+                horas_trabajadas = sum([(a.fecha_hora_salida - a.fecha_hora_entrada).total_seconds() / 3600 for a in asistencias])
+                
+                # Lógica de cálculo de planilla (simplificada)
+                # En un caso real, aquí irían las reglas complejas de horas extra, deducciones de ley (CCSS, etc.)
+                salario_hora = emp.salario_base / (4 * 48) # Asumiendo 48h semanales
+                salario_bruto = salario_hora * horas_trabajadas
+                deducciones = salario_bruto * 0.105 # Ejemplo: 10.5% de deducciones CCSS
+                salario_neto = salario_bruto - deducciones
+
+                # Guardar el registro de planilla
+                nueva_planilla = Planilla(
+                    empleado_id=emp.id,
+                    periodo_inicio=inicio_periodo,
+                    periodo_fin=fin_periodo,
+                    salario_bruto=salario_bruto,
+                    deducciones=deducciones,
+                    salario_neto=salario_neto
+                )
+                session.add(nueva_planilla)
+            session.commit()
+        
+        QMessageBox.information(self, "Éxito", f"Planilla para {periodo.strftime('%B %Y')} calculada.")
+        self.load_planilla_data()
+
+    def load_planilla_data(self):
+        periodo = self.planilla_date_edit.date().toPyDate()
+        inicio_periodo = datetime(periodo.year, periodo.month, 1)
+
+        with Session() as session:
+            planillas = session.query(Planilla).join(Empleado).filter(Planilla.periodo_inicio == inicio_periodo).all()
+            data = []
+            for p in planillas:
+                data.append([
+                    p.empleado.nombre,
+                    f"₡{p.salario_bruto:,.2f}",
+                    f"₡{p.deducciones:,.2f}",
+                    f"₡{p.salario_neto:,.2f}"
+                ])
+            headers = ["Empleado", "Salario Bruto", "Deducciones", "Salario Neto"]
+            model = GenericTableModel(data, headers)
+            self.planilla_table.setModel(model)
+    
+    def exportar_planilla(self):
+        # Implementación similar a exportar empleados, pero con los datos de la planilla
+        QMessageBox.information(self, "Info", "Funcionalidad de exportación de planilla pendiente.")
+
+    # --- Métodos para Pestaña de Reclutamiento (sin cambios, omitido por brevedad) ---
+    def load_puestos_data(self):
+        self.puestos_combo.clear()
+        with Session() as session:
+            puestos = session.query(Puesto).filter(Puesto.activo == True).order_by(Puesto.titulo).all()
+            for p in puestos:
+                self.puestos_combo.addItem(p.titulo, p.id)
+
+    def create_puesto(self):
+        titulo, ok = QInputDialog.getText(self, "Nuevo Puesto", "Título del Puesto:")
+        if ok and titulo:
+            requerimientos, ok = QInputDialog.getMultiLineText(self, "Nuevo Puesto", "Requerimientos Clave (uno por línea):")
+            if ok:
+                with Session() as session:
+                    nuevo_puesto = Puesto(titulo=titulo, requerimientos=requerimientos)
+                    session.add(nuevo_puesto)
+                    session.commit()
+                self.load_puestos_data()
+
+    def load_candidatos_data(self):
+        puesto_id = self.puestos_combo.currentData()
+        if not puesto_id:
+            self.candidatos_table.setModel(None)
+            return
+
+        with Session() as session:
+            candidatos = session.query(Candidato).filter(Candidato.puesto_id == puesto_id).order_by(Candidato.puntuacion_general.desc()).all()
+            data = [[
+                c.id, c.nombre, c.puntuacion_general, 
+                c.experiencia_relevante_anos, c.nivel_ingles_estimado, c.resumen_alineacion
+            ] for c in candidatos]
+            headers = ["ID", "Nombre", "Puntuación", "Años Exp.", "Inglés", "Resumen IA"]
+            model = GenericTableModel(data, headers)
+            self.candidatos_table.setModel(model)
+            self.candidatos_table.setColumnWidth(5, 300)
+
+    def upload_cv(self):
+        puesto_id = self.puestos_combo.currentData()
+        if not puesto_id:
+            QMessageBox.warning(self, "Sin Selección", "Por favor, seleccione un puesto antes de subir un CV.")
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(self, "Seleccionar CV", "", "Documentos (*.pdf *.docx *.html *.htm *.txt)")
+        if not file_path:
+            return
+
+        nombre_candidato, ok = QInputDialog.getText(self, "Nombre del Candidato", "Ingrese el nombre completo del candidato:")
+        if not ok or not nombre_candidato:
+            return
+            
+        try:
+            with open(file_path, 'rb') as f:
+                file_bytes = f.read()
+            
+            cv_text = extract_text_from_file(file_path, file_bytes)
+            if len(cv_text) < 100:
+                QMessageBox.critical(self, "Error de Lectura", "No se pudo extraer suficiente texto del CV. El archivo podría estar basado en imágenes o corrupto.")
+                return
+
+            with Session() as session:
+                puesto = session.get(Puesto, puesto_id)
+                job_requirements = {"titulo": puesto.titulo, "requerimientos": puesto.requerimientos}
+
+            self.progress_dialog = QProgressDialog("Analizando CV con IA...", "Cancelar", 0, 0, self)
+            self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            self.progress_dialog.show()
+            
+            self.analysis_thread = AnalysisThread(job_requirements, cv_text)
+            self.analysis_thread.finished.connect(lambda analysis: self.on_analysis_finished(analysis, nombre_candidato, puesto_id, cv_text))
+            self.analysis_thread.error.connect(self.on_analysis_error)
+            self.analysis_thread.start()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo procesar el archivo: {e}")
+
+    def on_analysis_finished(self, analysis, nombre, puesto_id, cv_texto):
+        self.progress_dialog.close()
+        with Session() as session:
+            nuevo_candidato = Candidato(
+                nombre=nombre,
+                puesto_id=puesto_id,
+                cv_texto=cv_texto,
+                puntuacion_general=analysis.get('puntuacion_general', 0),
+                resumen_alineacion=analysis.get('resumen_alineacion', ''),
+                habilidades_encontradas=", ".join(analysis.get('habilidades_encontradas', [])),
+                experiencia_relevante_anos=analysis.get('experiencia_relevante_anos', 0),
+                nivel_ingles_estimado=analysis.get('nivel_ingles_estimado', 'N/A'),
+                puntos_fuertes=analysis.get('puntos_fuertes', ''),
+                posibles_debilidades=analysis.get('posibles_debilidades', '')
+            )
+            session.add(nuevo_candidato)
+            session.commit()
+        
+        QMessageBox.information(self, "Éxito", "El CV ha sido analizado y el candidato ha sido agregado.")
+        self.load_candidatos_data()
+
+    def on_analysis_error(self, error_message):
+        self.progress_dialog.close()
+        QMessageBox.critical(self, "Error de Análisis", error_message)
+
+# --- Punto de Entrada de la Aplicación ---
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
