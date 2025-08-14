@@ -1,0 +1,297 @@
+import sys
+import json
+import requests
+import sqlite3
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+    QTableWidget, QTableWidgetItem, QPushButton, QLineEdit, QLabel, 
+    QTabWidget, QFormLayout, QComboBox, QSlider, QMessageBox
+)
+from PyQt6.QtCore import Qt
+
+# --- CONFIGURACIÓN ---
+# En una aplicación real, esto estaría en un archivo de configuración
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
+GEMINI_API_KEY = "" # Dejar en blanco, Canvas lo gestionará
+
+class RH_App(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("OpenNexus - Sistema de Gestión de RRHH con IA")
+        self.setGeometry(100, 100, 1200, 700)
+
+        # --- Conexión a la Base de Datos ---
+        self.conn = sqlite3.connect('opennexus_rh.db')
+        self.create_tables()
+
+        # --- Estructura Principal ---
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+
+        # --- Pestañas de la Aplicación ---
+        self.tab_empleados = QWidget()
+        self.tab_evaluaciones = QWidget()
+
+        self.tabs.addTab(self.tab_empleados, "Gestión de Empleados")
+        self.tabs.addTab(self.tab_evaluaciones, "Evaluaciones con IA")
+
+        # --- Inicializar el contenido de cada pestaña ---
+        self.init_ui_empleados()
+        self.init_ui_evaluaciones()
+
+        # Cargar datos iniciales
+        self.load_employees()
+
+    def create_tables(self):
+        """Crea las tablas en la base de datos si no existen."""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS employees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                position TEXT NOT NULL,
+                department TEXT NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS evaluations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER,
+                innovation INTEGER,
+                teamwork INTEGER,
+                leadership INTEGER,
+                ai_analysis TEXT,
+                FOREIGN KEY (employee_id) REFERENCES employees (id)
+            )
+        ''')
+        self.conn.commit()
+
+    # --- Pestaña de Gestión de Empleados ---
+    def init_ui_empleados(self):
+        layout = QVBoxLayout()
+
+        # Formulario para agregar nuevos empleados
+        form_layout = QFormLayout()
+        self.emp_name = QLineEdit()
+        self.emp_position = QLineEdit()
+        self.emp_department = QLineEdit()
+        
+        form_layout.addRow("Nombre:", self.emp_name)
+        form_layout.addRow("Puesto:", self.emp_position)
+        form_layout.addRow("Departamento:", self.emp_department)
+
+        add_button = QPushButton("Agregar Empleado")
+        add_button.setStyleSheet("background-color: #64ffda; color: #0a192f; font-weight: bold; padding: 10px;")
+        add_button.clicked.connect(self.add_employee)
+
+        # Tabla para mostrar empleados
+        self.employee_table = QTableWidget()
+        self.employee_table.setColumnCount(4)
+        self.employee_table.setHorizontalHeaderLabels(["ID", "Nombre", "Puesto", "Departamento"])
+
+        layout.addLayout(form_layout)
+        layout.addWidget(add_button)
+        layout.addWidget(self.employee_table)
+        
+        self.tab_empleados.setLayout(layout)
+
+    def add_employee(self):
+        """Agrega un empleado a la base de datos y actualiza la tabla."""
+        name = self.emp_name.text()
+        position = self.emp_position.text()
+        department = self.emp_department.text()
+
+        if name and position and department:
+            cursor = self.conn.cursor()
+            cursor.execute("INSERT INTO employees (name, position, department) VALUES (?, ?, ?)", 
+                           (name, position, department))
+            self.conn.commit()
+            
+            # Limpiar campos y recargar tabla
+            self.emp_name.clear()
+            self.emp_position.clear()
+            self.emp_department.clear()
+            self.load_employees()
+        else:
+            QMessageBox.warning(self, "Datos incompletos", "Por favor, llene todos los campos.")
+
+    def load_employees(self):
+        """Carga los empleados desde la BD a la tabla y al combobox de evaluaciones."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM employees")
+        employees = cursor.fetchall()
+        
+        self.employee_table.setRowCount(len(employees))
+        for row_idx, row_data in enumerate(employees):
+            for col_idx, col_data in enumerate(row_data):
+                self.employee_table.setItem(row_idx, col_idx, QTableWidgetItem(str(col_data)))
+        
+        # Actualizar el ComboBox en la pestaña de evaluaciones
+        if hasattr(self, 'eval_employee_combo'):
+            self.eval_employee_combo.clear()
+            self.eval_employee_combo.addItem("-- Seleccione un empleado --", -1)
+            for emp in employees:
+                self.eval_employee_combo.addItem(emp[1], emp[0]) # Texto: nombre, Dato: id
+
+    # --- Pestaña de Evaluaciones con IA ---
+    def init_ui_evaluaciones(self):
+        layout = QHBoxLayout()
+        
+        # Panel de control de evaluación
+        control_panel = QWidget()
+        control_layout = QVBoxLayout()
+
+        self.eval_employee_combo = QComboBox()
+        control_layout.addWidget(QLabel("Seleccionar Empleado:"))
+        control_layout.addWidget(self.eval_employee_combo)
+
+        # Sliders para competencias
+        self.sliders = {}
+        for skill in ["Innovación", "Trabajo en Equipo", "Liderazgo"]:
+            skill_layout = QHBoxLayout()
+            label = QLabel(f"{skill}: 5")
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(1, 10)
+            slider.setValue(5)
+            slider.valueChanged.connect(lambda value, lbl=label, s=skill: lbl.setText(f"{s}: {value}"))
+            
+            self.sliders[skill.lower().replace(" ", "_")] = slider
+            skill_layout.addWidget(label)
+            skill_layout.addWidget(slider)
+            control_layout.addLayout(skill_layout)
+
+        analyze_button = QPushButton("Generar Análisis con IA")
+        analyze_button.setStyleSheet("background-color: #57cbff; color: #0a192f; font-weight: bold; padding: 10px;")
+        analyze_button.clicked.connect(self.generate_ai_analysis)
+        
+        control_layout.addWidget(analyze_button)
+        control_panel.setLayout(control_layout)
+
+        # Panel de resultados de la IA
+        results_panel = QWidget()
+        results_layout = QVBoxLayout()
+        results_layout.addWidget(QLabel("Análisis y Recomendaciones de la IA:"))
+        self.ai_results_label = QLabel("El análisis generado aparecerá aquí...")
+        self.ai_results_label.setWordWrap(True)
+        self.ai_results_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        
+        results_layout.addWidget(self.ai_results_label)
+        results_panel.setLayout(results_layout)
+
+        layout.addWidget(control_panel, 1)
+        layout.addWidget(results_panel, 2)
+        self.tab_evaluaciones.setLayout(layout)
+
+    def generate_ai_analysis(self):
+        """Prepara y envía la solicitud a la API de Gemini."""
+        employee_id = self.eval_employee_combo.currentData()
+        if employee_id == -1:
+            QMessageBox.warning(self, "Selección requerida", "Por favor, seleccione un empleado.")
+            return
+
+        employee_name = self.eval_employee_combo.currentText()
+        scores = {skill: slider.value() for skill, slider in self.sliders.items()}
+
+        self.ai_results_label.setText("Analizando... por favor espere.")
+        QApplication.processEvents() # Forzar actualización de la UI
+
+        # --- Llamada a la API de Gemini ---
+        prompt = f"""
+        Actúa como un experto en Recursos Humanos para la startup tecnológica OpenNexus en Costa Rica.
+        Analiza la siguiente evaluación de desempeño para el empleado '{employee_name}' y proporciona:
+        1. Un resumen conciso y profesional del desempeño.
+        2. Tres (3) sugerencias de desarrollo específicas, accionables y positivas.
+
+        Datos de Evaluación:
+        - Innovación: {scores['innovación']}/10
+        - Trabajo en Equipo: {scores['trabajo_en_equipo']}/10
+        - Liderazgo: {scores['liderazgo']}/10
+
+        Formato de respuesta: Markdown.
+        """
+        
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
+        }
+        
+        headers = {'Content-Type': 'application/json'}
+
+        try:
+            # Usamos una llamada síncrona para simplificar el ejemplo de escritorio
+            response = requests.post(f"{GEMINI_API_URL}?key={GEMINI_API_KEY}", headers=headers, json=payload, timeout=30)
+            response.raise_for_status() # Lanza un error si la respuesta no es 2xx
+            
+            result = response.json()
+            analysis_text = result['candidates'][0]['content']['parts'][0]['text']
+            
+            self.ai_results_label.setText(analysis_text)
+
+            # Guardar en la base de datos
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO evaluations (employee_id, innovation, teamwork, leadership, ai_analysis)
+                VALUES (?, ?, ?, ?, ?)
+            """, (employee_id, scores['innovación'], scores['trabajo_en_equipo'], scores['liderazgo'], analysis_text))
+            self.conn.commit()
+
+        except requests.exceptions.RequestException as e:
+            self.ai_results_label.setText(f"Error de conexión al generar el análisis: {e}")
+        except (KeyError, IndexError) as e:
+            self.ai_results_label.setText(f"Error al procesar la respuesta de la IA: {e}\nRespuesta recibida: {result}")
+        except Exception as e:
+            self.ai_results_label.setText(f"Ocurrió un error inesperado: {e}")
+
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    
+    # --- Estilo de la aplicación (Dark Mode) ---
+    app.setStyleSheet("""
+        QWidget {
+            background-color: #0a192f;
+            color: #ccd6f6;
+            font-size: 14px;
+        }
+        QMainWindow {
+            background-color: #0a192f;
+        }
+        QTabWidget::pane {
+            border: 1px solid #112240;
+        }
+        QTabBar::tab {
+            background: #112240;
+            color: #8892b0;
+            padding: 10px;
+            border-top-left-radius: 5px;
+            border-top-right-radius: 5px;
+        }
+        QTabBar::tab:selected {
+            background: #57cbff;
+            color: #0a192f;
+            font-weight: bold;
+        }
+        QTableWidget {
+            background-color: #112240;
+            gridline-color: #1d2d50;
+        }
+        QHeaderView::section {
+            background-color: #1d2d50;
+            padding: 5px;
+            border: none;
+        }
+        QLineEdit, QComboBox {
+            background-color: #112240;
+            border: 1px solid #1d2d50;
+            padding: 5px;
+            border-radius: 3px;
+        }
+        QMessageBox {
+            background-color: #112240;
+        }
+    """)
+    
+    main_window = RH_App()
+    main_window.show()
+    sys.exit(app.exec())

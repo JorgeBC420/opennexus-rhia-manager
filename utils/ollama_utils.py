@@ -1,16 +1,25 @@
 import requests
 import json
 from config import OLLAMA_API_URL, OLLAMA_MODEL
+from typing import Dict, Any, Optional
 
-def analyze_cv_with_ollama(job_requirements, cv_text):
+def analyze_cv_with_ollama(job_requirements: Dict[str, Any], cv_text: str) -> Optional[Dict[str, Any]]:
+    """
+    Analiza un CV usando Ollama y retorna la evaluación en formato JSON estructurado.
+    Args:
+        job_requirements (dict): Diccionario con los requerimientos del puesto.
+        cv_text (str): Texto extraído del CV.
+    Returns:
+        dict | None: Análisis estructurado o None si falla.
+    """
     prompt = f"""
     Actúa como un reclutador técnico senior altamente experimentado para una startup de tecnología en Costa Rica. Tu tarea es analizar el siguiente currículum y evaluarlo objetivamente contra los requerimientos del puesto.
 
     **Puesto:**
-    {job_requirements['titulo']}
+    {job_requirements.get('titulo', job_requirements.get('puesto', ''))}
 
     **Requerimientos Clave:**
-    {job_requirements['requerimientos']}
+    {job_requirements.get('requerimientos', '')}
 
     **Texto del Currículum:**
     ---

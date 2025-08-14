@@ -1,11 +1,71 @@
+# #############################################################
+# ## Archivo .gitignore para OPNeXOX RHIA Manager           ##
+# ## Versión 1.0 - Creado por Jorge Bravo & Gemini         ##
+# #############################################################
+
+# --- Entornos Virtuales ---
+# Ignora la carpeta del entorno virtual, esté donde esté.
+.venv/
+venv/
+env/
+
+# --- Dependencias de Python ---
+# Ignora las carpetas de instalación de paquetes.
+lib/
+lib64/
+include/
+Scripts/
+# Archivos de caché de Python
 __pycache__/
-*.pyc
-uploads/
-*.db
+*.py[cod]
+*$py.class
+
+# --- Archivos de Base de Datos ---
+# Ignora archivos de base de datos específicos, NO todos los *.db
+# Si usas SQLite para pruebas, añade el nombre de tu archivo aquí.
+# ejemplo.db
+# *.sqlite3
+
+# --- Archivos de Configuración de IDEs y Editores ---
+# Visual Studio Code
+.vscode/
+# Visual Studio 2022
+.vs/
+# PyCharm
+.idea/
+
+# --- Archivos del Sistema Operativo ---
+# Windows
+Thumbs.db
+Desktop.ini
+# macOS
+.DS_Store
+
+# --- Archivos Sensibles (Secretos) ---
+# Archivos de variables de entorno
 .env
-/.venv/
-ollama/
-*.ollama
+.env.*
+# NO ignores el archivo de ejemplo
+!.env.example
+
+# --- Modelos de IA (Ollama y otros) ---
+# Estos archivos pueden ser muy grandes y no deben estar en el repositorio.
+# Cada desarrollador debe descargarlos por su cuenta.
+/ollama_models/
 *.bin
+*.gguf
+*.ollama
+*.pt
+*.safetensors
+
+# --- Archivos de Usuario ---
+# La carpeta donde los usuarios suben sus CVs
+uploads/
+# Cualquier archivo generado por el usuario
+/generated_reports/
+
+# --- Logs y Archivos de Construcción/Distribución ---
 *.log
-models/
+build/
+dist/
+*.egg-info/

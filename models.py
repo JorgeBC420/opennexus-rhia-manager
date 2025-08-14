@@ -2,6 +2,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from datetime import datetime
 from config import DATABASE_URI
+from typing import Optional
 
 Base = declarative_base()
 engine = create_engine(DATABASE_URI)
